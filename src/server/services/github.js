@@ -2,19 +2,32 @@
 //api
 // var github_api = require('../api/github');
 var https = require('https');
+var url = require('url');
 var q = require('q');
 
 var GitHubApi = require('github');
 
+
+function callGithub(github, obj, fun, arg, done) {
+    github[obj][fun](arg, function (err, res) {
+        if (typeof done === 'function') {
+            done(err, res);
+        }
+
+    });
+}
+
 module.exports = {
 
     call: function(call, done) {
-
         var obj = call.obj;
         var fun = call.fun;
         var arg = call.arg || {};
         var token = call.token;
         var basicAuth = call.basicAuth;
+        var deferred = q.defer();
+        var error;
+        var data = null;
 
         var github = new GitHubApi({
             protocol: config.server.github.protocol,
@@ -23,30 +36,12 @@ module.exports = {
             pathPrefix: config.server.github.enterprise ? '/api/v3' : null
         });
 
-        if(!obj || !github[obj]) {
-            return done('obj required/obj not found');
-        }
-
-        if(!fun || !github[obj][fun]) {
-            return done('fun required/fun not found');
-        }
-
-        if(token) {
-            github.authenticate({
-                type: 'oauth',
-                token: token
-            });
-        }
-
-        if(basicAuth) {
-            github.authenticate({
-                type: 'basic',
-                username: basicAuth.user,
-                password: basicAuth.pass
-            });
-        }
-
-        github[obj][fun](arg, function(err, res) {
+        function collectData(err, res) {
+            // if (res && !err) {
+            if (res) {
+                data = data ? data : res instanceof Array ? [] : {};
+                data = res instanceof Array ? data.concat(res) : res;
+            }
 
             var meta = {};
 
@@ -59,12 +54,52 @@ module.exports = {
                 meta = null;
             }
 
-            if(typeof done === 'function') {
-                done(err, res, meta);
+            if (meta && meta.link && github.hasNextPage(meta.link)) {
+                github.getNextPage(meta.link, collectData);
+            } else {
+                if (typeof done === 'function') {
+                    done(err, data, meta);
+                }
+                deferred.resolve({ data: data, meta: meta });
             }
+        }
 
-        });
+        if (!obj || !github[obj]) {
+            error = 'obj required/obj not found';
+            deferred.reject(error);
+            if (typeof done === 'function') {
+                done(error);
+            };
+            return;
+        }
 
+        if (!fun || !github[obj][fun]) {
+            error = 'fun required/fun not found';
+            deferred.reject(error);
+            if (typeof done === 'function') {
+                done(error);
+            };
+            return;
+        }
+
+        if (token) {
+            github.authenticate({
+                type: 'oauth',
+                token: token
+            });
+        }
+
+        if (basicAuth) {
+            github.authenticate({
+                type: 'basic',
+                username: basicAuth.user,
+                password: basicAuth.pass
+            });
+        }
+
+        callGithub(github, obj, fun, arg, collectData);
+
+        return deferred.promise;
     },
 
     hasNextPage: function(link) {
@@ -91,18 +126,25 @@ module.exports = {
         var deferred = q.defer();
         var http_req = {};
         var data = '';
-        http_req = https.request(args.url, function(res){
+        var req_url = url.parse(args.url);
+        var options = {
+            host: req_url.host,
+            path: req_url.path,
+            method: args.http_method || 'GET'
+        };
+
+        http_req = https.request(options, function(res) {
             res.on('data', function(chunk) { data += chunk; });
-            res.on('end', function(){
+            res.on('end', function() {
                 data = data ? JSON.parse(data) : null;
                 var meta = {};
                 meta.scopes = res.headers['x-oauth-scopes'];
                 meta.link = res.headers.link;
 
-                deferred.resolve({data: data, meta: meta});
+                deferred.resolve({ data: data, meta: meta });
 
                 if (typeof done === 'function') {
-                    done(null, {data: data, meta: meta});
+                    done(null, { data: data, meta: meta });
                 }
             });
         });
@@ -111,9 +153,13 @@ module.exports = {
         http_req.setHeader('User-Agent', 'cla-assistant');
         http_req.setHeader('Accept', 'application/vnd.github.moondragon+json');
 
+        if (options.method === 'POST' && args.body) {
+            http_req.write(JSON.stringify(args.body));
+        }
+
         http_req.end();
 
-        http_req.on('error', function (e) {
+        http_req.on('error', function(e) {
             deferred.reject(e);
 
             if (typeof done === 'function') {

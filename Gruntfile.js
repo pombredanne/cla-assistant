@@ -66,7 +66,7 @@ module.exports = function (grunt) {
 				files: ['src/**/*.js', '!src/client/app.min.js']
 			},
 			mocha: {
-				tasks: ['mochaTest'],
+				tasks: ['mocha_istanbul'],
 				files: ['src/**/*.js', '!src/client/app.min.js']
 			},
 			karma: {
@@ -98,4 +98,5 @@ module.exports = function (grunt) {
 	grunt.registerTask('lint', ['eslint', 'scsslint']);
 	grunt.registerTask('coverage', ['mocha_istanbul', 'coveralls']);
 	grunt.registerTask('default', ['uglify', 'eslint', 'mochaTest', 'karma', 'watch']);
+	grunt.registerTask('test', ['eslint', 'mochaTest', 'karma']);
 };

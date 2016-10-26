@@ -173,7 +173,7 @@ async.series([
     }
     var log = require('./services/logger');
 
-    console.log('\n✓ '.bold.green + 'bootstrapped, '.bold + 'app listening on localhost:' + config.server.localport);
+    console.log('\n✓ '.bold.green + 'bootstrapped, '.bold + 'app listening on ' + config.server.http.host + ':' + config.server.localport);
     log.info('✓ bootstrapped !!! App listening on ' + config.server.http.host + ':' + config.server.http.port);
 });
 
@@ -189,7 +189,7 @@ app.all('/api/:obj/:fun', function(req, res) {
             return res.status(err.code > 0 ? err.code : 500).send(JSON.stringify(err.text || err));
         }
         if (obj) {
-            obj = req.params.obj === 'repo' ? cleanup.cleanObject(obj) : obj;
+            obj = cleanup.cleanObject(obj);
             res.send(JSON.stringify(obj));
         } else {
             res.send();

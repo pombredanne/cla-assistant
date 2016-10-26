@@ -1,16 +1,83 @@
 // modules
 var async = require('async');
+var q = require('q');
 
 // services
 var github = require('../services/github');
 var cla = require('../services/cla');
 var status = require('../services/status');
 var repoService = require('../services/repo');
-var url = require('../services/url');
+var orgService = require('../services/org');
 var prService = require('../services/pullRequest');
 var log = require('../services/logger');
 
 var token;
+
+function markdownRender (content, token) {
+    var deferred = q.defer();
+    var args = {
+        obj: 'misc',
+        fun: 'renderMarkdown',
+        arg: {
+            text: content
+        },
+        token: token
+    };
+
+    github.call(args, function (error, response) {
+        var callback_error;
+        if (!response || response.statusCode !== 200) {
+            callback_error = response && response.message ? response.message : error;
+            if (callback_error) {
+                deferred.reject(callback_error);
+                return;
+            }
+        }
+        if (response) {
+            deferred.resolve({
+                raw: response.body || response.data || response
+            });
+        } else {
+            deferred.reject(callback_error);
+        }
+
+    });
+    return deferred.promise;
+}
+
+function renderFiles (files, renderToken) {
+    var deferred = q.defer();
+    try {
+        var content;
+        Object.keys(files).some(function (name) {
+            content = name != 'metadata' ? files[name].content : content;
+            return name != 'metadata';
+        });
+    } catch (e) {
+        deferred.reject(e);
+        return deferred.promise;
+    }
+    var metadata = files && files['metadata'] ? files['metadata'].content : undefined;
+
+    var gistContent = {}, contentPromise, metaPromise;
+    contentPromise = markdownRender(content, renderToken).then(function (data) {
+        return data.raw;
+    });
+    if (metadata) {
+        metaPromise = markdownRender(metadata, renderToken).then(function (data) {
+            return data.raw;
+        });
+    }
+    q.all([contentPromise, metaPromise]).then(function (data) {
+        gistContent.raw = data[0];
+        gistContent.meta = data[1];
+        deferred.resolve(gistContent);
+    },
+        function (msg) {
+            deferred.reject(msg);
+        });
+    return deferred.promise;
+}
 
 module.exports = {
     getGist: function (req, done) {
@@ -20,17 +87,18 @@ module.exports = {
                 gist: req.args.gist
             }, done);
         } else {
-            cla.getRepo(req.args, function (err, repo) {
-                if (err || !repo) {
+            var service = req.args.orgId ? orgService : repoService;
+            service.get(req.args, function (err, item) {
+                if (err || !item) {
                     log.warn(new Error(err).stack, 'with args: ', req.args);
                     done(err);
                     return;
                 }
                 var gist_args = {
-                    gist_url: repo.gist
+                    gist_url: item.gist
                 };
                 gist_args = req.args.gist ? req.args.gist : gist_args;
-                token = req.user && req.user.token ? req.user.token : repo.token;
+                token = item.token;
                 cla.getGist({
                     token: token,
                     gist: gist_args
@@ -40,10 +108,10 @@ module.exports = {
     },
 
     get: function(req, done) {
-        if (!req.args || (!req.args.repo && !req.args.repoId)) {
+        if (!req.args || (!req.args.repo && !req.args.repoId && !req.args.orgId)) {
             log.info('args: ', req.args);
             log.info('request headers: ', req.headers);
-            done('Please, provide owner and repo name');
+            done('Please, provide owner and repo name or orgId');
             return;
         }
         this.getGist(req, function (err, res) {
@@ -52,39 +120,17 @@ module.exports = {
                 done(err);
                 return;
             }
-            try {
-                var args = {
-                    obj: 'markdown',
-                    fun: 'render',
-                    arg: {
-                        text: res.files[Object.keys(res.files)[0]].content
-                    }
-                };
-            } catch (e){
-                log.warn(e, ' Args: ', req.args);
-                done(e);
-                return;
-            }
 
-            args.token = req.user && req.user.token ? req.user.token : token;
-
-            github.call(args, function (error, response) {
-                var callback_error;
-                if (!response || response.statusCode !== 200) {
-                    callback_error = response && response.message ? response.message : error;
-                    if (callback_error) {
-                        log.error(callback_error);
-                    }
+            var renderToken = token ? token : req.user && req.user.token ? req.user.token : token;
+            renderFiles(res.files, renderToken).then(
+                function success (gistContent) {
+                    done(null, gistContent);
+                },
+                function error(msg) {
+                    log.warn(new Error(msg).stack, ' Args: ', req.args);
+                    done(msg);
                 }
-                if (response) {
-                    done(callback_error, {
-                        raw: response.body || response.data || response
-                    });
-                } else {
-                    done(callback_error);
-                }
-
-            });
+            );
         });
     },
 
@@ -98,21 +144,17 @@ module.exports = {
     //Get users last signature for given repository (if repo is currently linked)
     //Parameters: repo, owner (mandatory)
     getLastSignature: function (req, done) {
-        cla.getRepo(req.args, function (err, repo) {
-            if (err || !repo) {
-                log.warn(err);
-                done(err);
-                return;
-            }
-            var args = {
-                repo: req.args.repo,
-                owner: req.args.owner,
-                user: req.user.login,
-                gist_url: repo.gist
-            };
+        var args = req.args;
+        args.user = req.user.login;
+        cla.getLastSignature(args, done);
+    },
 
-            cla.getLastSignature(args, done);
-        });
+    //Fihnd linked item using reponame and owner as parameters
+    // Params:
+    // repo (mandatory)
+    // owner (mandatory)
+    getLinkedItem: function (req, done) {
+        cla.getLinkedItem(req.args, done);
     },
 
     //Get all signed CLAs for given repo and gist url and/or a given gist version
@@ -131,37 +173,84 @@ module.exports = {
     //	owner (mandatory)
     //	gist.gist_url (optional)
     //	gist.gist_version (optional)
-    countCLA: function(req, done){
+    countCLA: function (req, done) {
         var params = req.args;
-        function getMissingParams (cb){
-            if (params.gist && params.gist.gist_url && params.gist.gist_version) {
+        var self = this;
+        function getMissingParams(cb) {
+            if (params.gist && params.gist.gist_url && params.gist.gist_version && (params.repoId || params.orgId)) {
                 cb();
-            } else{
-                cla.getRepo(req.args, function(err, repo){
-                    if (err || !repo) {
-                        cb();
+            } else {
+                self.getLinkedItem(req, function (err, item) {
+                    if (err || !item) {
+                        cb(err + ' There is no such item');
+                        log.info(err, 'There is no such item for args: ', req.args);
+                        return;
                     }
-                    params.token = repo.token;
+                    params.token = item.token;
+                    if (item.orgId) {
+                        params.orgId = item.orgId;
+                    } else if (item.repoId) {
+                        params.repoId = item.repoId;
+                    }
                     params.gist = params.gist && params.gist.gist_url ? params.gist : {
-                        gist_url: repo.gist
+                        gist_url: item.gist
                     };
-                    cla.getGist(req.args, function(e, gist){
+                    cla.getGist(req.args, function (e, gist) {
                         params.gist.gist_version = gist.history[0].version;
                         cb();
                     });
                 });
             }
         }
-        function count (){
-            cla.getAll(params, function(err, clas){
+        function count(err) {
+            if (err) {
+                done(err);
+                return;
+            }
+            cla.getAll(params, function (err, clas) {
                 done(err, clas.length);
             });
         }
         getMissingParams(count);
     },
 
-    validatePullRequests: function(req, done) {
+    validateOrgPullRequests: function (req, done) {
+        var self = this;
+        github.call({
+            obj: 'repos',
+            fun: 'getForOrg',
+            arg: {
+                org: req.args.org,
+                per_page: 100
+            },
+            token: req.args.token || req.user.token
+        }, function (err, repos) {
+            orgService.get(req.args, function (err, linkedOrg) {
+                if (repos && !repos.message && repos.length > 0) {
+                    repos
+                        .filter(function (repo) { return (linkedOrg.isRepoExcluded === undefined) || !linkedOrg.isRepoExcluded(repo.name); })
+                        .forEach(function (repo) {
+                            var validateRequest = {
+                                args: {
+                                    owner: repo.owner.login,
+                                    repo: repo.name,
+                                    token: req.args.token || req.user.token
+                                },
+                                user: req.user
+                            };
+                            self.validatePullRequests(validateRequest);
+                        });
+                }
+                if (typeof done === 'function') {
+                    done(repos.message || err, true);
+                }
+            });
+        });
+    },
+
+    validatePullRequests: function (req, done) {
         var pullRequests = [];
+        var token = req.args.token ? req.args.token : req.user.token;
         function collectData(err, res, meta) {
             if (err) {
                 log.error(err);
@@ -182,9 +271,11 @@ module.exports = {
                 pullRequests.forEach(function (pullRequest) {
                     var status_args = {
                         repo: req.args.repo,
-                        owner: req.args.owner
+                        owner: req.args.owner,
+                        token: token
                     };
                     status_args.number = pullRequest.number;
+
                     cla.check(status_args, function (cla_err, all_signed, user_map) {
                         if (cla_err) {
                             log.error(cla_err);
@@ -215,44 +306,8 @@ module.exports = {
                 state: 'open',
                 per_page: 100
             },
-            token: req.args.token ? req.args.token : req.user.token
+            token: token
         }, collectData);
-
-        // github.direct_call({
-        //     url: url.githubPullRequests(req.args.owner, req.args.repo, 'open'),
-        //     token: req.args.token ? req.args.token : req.user.token
-        // }, function (error, res) {
-        //     if (error) {
-        //         log.error(error);
-        //     }
-
-        //     if (res && res.data && !error) {
-        //         res.data.forEach(function (pullRequest) {
-        //             var status_args = {
-        //                 repo: req.args.repo,
-        //                 owner: req.args.owner
-        //             };
-        //             status_args.number = pullRequest.number;
-        //             cla.check(status_args, function (cla_err, all_signed, user_map) {
-        //                 if (cla_err) {
-        //                     log.error(cla_err);
-        //                 }
-        //                 status_args.signed = all_signed;
-        //                 status.update(status_args);
-        //                 prService.editComment({
-        //                     repo: req.args.repo,
-        //                     owner: req.args.owner,
-        //                     number: status_args.number,
-        //                     signed: all_signed,
-        //                     user_map: user_map
-        //                 });
-        //             });
-        //         });
-        //     }
-        //     if (typeof done === 'function') {
-        //         done(error);
-        //     }
-        // });
     },
 
     sign: function (req, done) {
@@ -260,23 +315,33 @@ module.exports = {
             repo: req.args.repo,
             owner: req.args.owner,
             user: req.user.login,
-            user_id: req.user.id
+            userId: req.user.id,
         };
+        if (req.args.custom_fields) {
+            args.custom_fields = req.args.custom_fields;
+        }
         var self = this;
 
         cla.sign(args, function (err, signed) {
             if (err) {
                 log.error(err);
             }
-            repoService.get({
-                repo: args.repo,
-                owner: args.owner
-            }, function (e, repo) {
+            self.getLinkedItem({
+                args: {
+                    repo: args.repo,
+                    owner: args.owner
+                }
+            }, function (e, item) {
                 if (e) {
                     log.error(e);
                 }
-                req.args.token = repo.token;
-                self.validatePullRequests(req);
+                req.args.token = item.token;
+                if (item.org) {
+                    req.args.org = item.org;
+                    self.validateOrgPullRequests(req);
+                } else {
+                    self.validatePullRequests(req);
+                }
             });
             done(err, signed);
         });
@@ -298,8 +363,8 @@ module.exports = {
 
         async.each(users, function (user, callback) {
             github.call({
-                obj: 'user',
-                fun: 'getFrom',
+                obj: 'users',
+                fun: 'getForUser',
                 arg: {
                     user: user
                 },
@@ -312,17 +377,17 @@ module.exports = {
                     repo: req.args.repo,
                     owner: req.args.owner,
                     user: gh_user.login,
-                    user_id: gh_user.id
+                    userId: gh_user.id
                 }, callback);
             });
         }, done);
     }
 
     // updateDBData: function (req, done) {
-    //     repoService.updateDBData(req, function(){
+    //     // repoService.updateDBData(req, function(){
     //         cla.updateDBData(req, function(msg){
     //             done(null, msg);
     //         });
-    //     });
+    //     // });
     // }
 };

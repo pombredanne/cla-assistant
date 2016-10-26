@@ -5,12 +5,13 @@ var Repo = mongoose.model('Repo');
 //services
 var github = require('../services/github');
 var logger = require('../services/logger');
+var orgService = require('../services/org');
 
 //services
 var url = require('../services/url');
 
 var isTransferredRenamed = function (dbRepo, ghRepo) {
-    return ghRepo.repoId === dbRepo.repoId && (ghRepo.repo !== dbRepo.repo || ghRepo.owner !== dbRepo.owner);
+    return ghRepo.repoId == dbRepo.repoId && (ghRepo.repo !== dbRepo.repo || ghRepo.owner !== dbRepo.owner);
 };
 
 var compareRepoNameAndUpdate = function (dbRepo, ghRepo) {
@@ -49,6 +50,7 @@ var selection = function (args) {
 };
 
 module.exports = {
+    timesToRetryGitHubCall: 10,
     all: function (done) {
         Repo.find({}, function (err, repos) {
             done(err, repos);
@@ -73,33 +75,37 @@ module.exports = {
     },
     get: function (args, done) {
         Repo.findOne(selection(args), function (err, repo) {
+            if(!err && !repo){
+                err = 'Repository not found in Database';
+            }
             done(err, repo);
         });
     },
     getAll: function (args, done) {
-        var ghRepos = args.set;
         var repoIds = [];
         args.set.forEach(function (repo) {
             repoIds.push({ repoId: repo.repoId });
         });
         Repo.find({
             $or: repoIds
-        }, function (err, dbRepos) {
-            if (dbRepos) {
-                compareAllRepos(ghRepos, dbRepos, function () {
-                    done(err, dbRepos);
-                });
-            } else {
-                done(err, dbRepos);
-            }
-        });
+        }, done);
     },
+
+    getByOwner: function (owner, done) {
+        Repo.find({ owner: owner }, done);
+    },
+
     update: function (args, done) {
-        Repo.findOne(selection(args), function (err, repo) {
+        var repoArgs = {
+            repo: args.repo,
+            owner: args.owner
+        };
+        Repo.findOne(repoArgs, function (err, repo) {
             if (err) {
                 done(err);
                 return;
             }
+            repo.repoId = args.repoId;
             repo.gist = args.gist;
             repo.save(done);
         });
@@ -109,8 +115,17 @@ module.exports = {
     },
 
     getPRCommitters: function (args, done) {
-        var callGithub = function (arg) {
+        var self = this;
+
+        var handleError = function (err, arguments) {
+            logger.info(new Error(err).stack);
+            logger.info('getPRCommitters with arg: ', arguments);
+            done(err);
+        };
+
+        var callGithub = function (arg, linkedItem) {
             var committers = [];
+            var linkedRepo = linkedItem && linkedItem.repoId ? linkedItem : undefined;
 
             github.direct_call(arg, function (err, res) {
                 if (err) {
@@ -137,35 +152,54 @@ module.exports = {
                     });
                     done(null, committers);
                 } else if (res.data.message) {
-                    logger.info(new Error(res.data.message).stack);
-                    logger.info('getPRCommitters with arg: ', arg);
-
                     arg.count = arg.count ? arg.count + 1 : 1;
-                    if (res.data.message === 'Not Found' && arg.count < 3) {
+                    if (res.data.message === 'Not Found' && arg.count < self.timesToRetryGitHubCall) {
                         setTimeout(function () {
                             callGithub(arg);
                         }, 1000);
-                    } else {
-                        done(res.data.message);
+                    } else if (res.data.message === 'Moved Permanently' && linkedRepo) {
+                        self.getGHRepo(args, function (err, res) {
+                            if (res && res.id && compareRepoNameAndUpdate(linkedRepo, { repo: res.name, owner: res.owner.login, repoId: res.id} )) {
+                                arg.repo = res.name;
+                                arg.owner = res.owner.login;
+                                arg.url = url.githubPullRequestCommits(arg.owner, arg.repo, arg.number);
+
+                                callGithub(arg);
+                            } else {
+                                handleError('Moved Permanently', arg);
+                            }
+                        });
+                    }
+                    else {
+                        handleError(res.data.message, arg);
                     }
                 }
 
             });
         };
 
-        Repo.findOne(selection(args), function (e, repo) {
-            if (e || !repo) {
-                var errorMsg = e;
-                errorMsg += 'with following arguments: ' + JSON.stringify(args);
-                logger.error(new Error(errorMsg).stack);
-                done(errorMsg);
-                return;
-            }
-
+        var collectTokenAndCallGithub = function (args, item) {
+            args.token = item.token;
             args.url = url.githubPullRequestCommits(args.owner, args.repo, args.number);
-            args.token = repo.token;
 
-            callGithub(args);
+            callGithub(args, item);
+        };
+
+        orgService.get({orgId: args.orgId}, function (e, org) {
+            if (!org) {
+                self.get(args, function (e, repo) {
+                    if (e || !repo) {
+                        var errorMsg = e;
+                        errorMsg += 'with following arguments: ' + JSON.stringify(args);
+                        logger.error(new Error(errorMsg).stack);
+                        done(errorMsg);
+                            return;
+                    }
+                    collectTokenAndCallGithub(args, repo);
+                });
+            } else {
+                collectTokenAndCallGithub(args, org);
+            }
         });
     },
 
@@ -194,8 +228,14 @@ module.exports = {
             });
             that.getAll({
                 set: repoSet
-            }, function (error, result) {
-                done(error, result);
+            }, function (err, dbRepos) {
+                if (dbRepos) {
+                    compareAllRepos(repoSet, dbRepos, function () {
+                        done(err, dbRepos);
+                    });
+                } else {
+                    done(err);
+                }
             });
         });
     },
@@ -234,6 +274,8 @@ module.exports = {
                 github.direct_call(params, function (e, ghRepository) {
                     done(e, ghRepository.data);
                 });
+            } else {
+                done('GH Repo not found');
             }
         });
     }

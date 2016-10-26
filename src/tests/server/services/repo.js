@@ -9,8 +9,8 @@ var Repo = require('../../../server/documents/repo').Repo;
 
 //services
 var github = require('../../../server/services/github');
+var orgService = require('../../../server/services/org');
 var url = require('../../../server/services/url');
-var config = require('../../../config');
 
 // service under test
 var repo = require('../../../server/services/repo');
@@ -95,6 +95,33 @@ describe('repo:check', function () {
     });
 });
 
+describe('repo:get', function () {
+    var response = {};
+    afterEach(function () {
+        Repo.findOne.restore();
+    });
+    it('should find the cla repo', function(it_done){
+        sinon.stub(Repo, 'findOne', function (args, done) {
+            done(null, response);
+        });
+        repo.get({ repoId: 123 }, function(err, obj){
+            assert(err == null);
+            assert(obj === response);
+            it_done();
+        });
+    });
+    it('should raise an error, if the cla repo was not found', function(it_done){
+        sinon.stub(Repo, 'findOne', function (args, done) {
+            done(null, null);
+        });
+        repo.get({ repoId: 123 }, function(err, obj){
+            assert(err === 'Repository not found in Database');
+            assert(obj == null);
+            it_done();
+        });
+    });
+});
+
 describe('repo:getAll', function () {
     var arg;
     var response;
@@ -141,42 +168,22 @@ describe('repo:getAll', function () {
             it_done();
         });
     });
-
-    it('should update repo name and owner on db if github repo was transferred', function(it_done){
-        arg = { set: [{
-            repo: 'newRepoName',
-            owner: 'newOwner',
-            repoId: 123
-        }]};
-        response = [{
-            repo: 'myRepo',
-            owner: 'owner',
-            repoId: 123,
-            save: function(){}
-        }];
-        sinon.spy(response[0], 'save');
-        repo.getAll(arg, function (err, obj) {
-            assert.equal(obj[0].repoId, 123);
-            assert.equal(obj[0].repo, arg.set[0].repo);
-            assert.equal(obj[0].owner, arg.set[0].owner);
-            assert(response[0].save.called);
-            it_done();
-        });
-    });
 });
 
 describe('repo:getPRCommitters', function () {
     var test_repo;
+    var test_org;
 
     beforeEach(function () {
         test_repo = {
+            repo: 'myRepo',
+            owner: 'myOwner',
+            repoId: '1',
             token: 'abc',
             save: function () {}
         };
+        test_org = null;
 
-        sinon.stub(Repo, 'findOne', function (args, done) {
-            done(null, test_repo);
-        });
         sinon.stub(github, 'direct_call', function (args, done) {
             assert(args.token);
             assert.equal(args.url, url.githubPullRequestCommits('owner', 'myRepo', 1));
@@ -184,11 +191,19 @@ describe('repo:getPRCommitters', function () {
                 data: testData.commits
             });
         });
+        sinon.stub(orgService, 'get', function (args, done) {
+            done(null, test_org);
+        });
+
+        sinon.stub(Repo, 'findOne', function (args, done) {
+            done(null, test_repo);
+        });
     });
 
     afterEach(function () {
-        Repo.findOne.restore();
         github.direct_call.restore();
+        orgService.get.restore();
+        Repo.findOne.restore();
     });
 
     it('should get committer for a pull request', function (it_done) {
@@ -213,9 +228,10 @@ describe('repo:getPRCommitters', function () {
             assert.equal(data[0].name, 'octocat');
             assert(Repo.findOne.called);
             assert(github.direct_call.called);
+
+            it_done();
         });
 
-        it_done();
     });
 
     it('should get author of commit if committer is a github bot', function (it_done) {
@@ -312,6 +328,7 @@ describe('repo:getPRCommitters', function () {
 
     it('should retry api call if gitHub returns "Not Found"', function (it_done) {
         this.timeout(4000);
+        repo.timesToRetryGitHubCall = 3;
         github.direct_call.restore();
         sinon.stub(github, 'direct_call', function (args, done) {
             done(null, {
@@ -334,11 +351,33 @@ describe('repo:getPRCommitters', function () {
         setTimeout(it_done, 3500);
     });
 
-    it('should handle not found repo', function (it_done) {
-        Repo.findOne.restore();
-        sinon.stub(Repo, 'findOne', function (args, done) {
-            done(null, null);
+
+    it('should get list of committers for a pull request using linked org', function (it_done) {
+        test_repo = null;
+        test_org = { token: 'abc' };
+        var arg = {
+            repo: 'myRepo',
+            owner: 'owner',
+            number: '1',
+            orgId: 1
+        };
+
+        repo.getPRCommitters(arg, function (err, data) {
+            assert.ifError(err);
+            assert.equal(data.length, 2);
+            assert.equal(data[0].name, 'octocat');
+            assert.equal(orgService.get.calledWith({ orgId: 1 }), true);
+            assert.equal(Repo.findOne.called, false);
+            assert.equal(github.direct_call.called, true);
+
+            it_done();
         });
+
+    });
+
+    it('should handle request for not linked repos and orgs', function (it_done) {
+        test_repo = null;
+
         var arg = {
             repo: 'myRepo',
             owner: 'owner',
@@ -352,6 +391,41 @@ describe('repo:getPRCommitters', function () {
         });
 
         it_done();
+    });
+
+    it('should update db entry if repo was transferred', function (it_done) {
+        this.timeout(3000);
+        github.direct_call.restore();
+        sinon.stub(github, 'direct_call', function (args, done) {
+            var res;
+            if (args.url.indexOf('commits') > -1){
+                res = args.url.indexOf('myRepo') > -1 ?
+                    { data: { message: 'Moved Permanently' } } :
+                    { data: testData.commits };
+            } else {
+                res = test_repo;
+            }
+            done(null, res);
+        });
+        sinon.stub(repo, 'getGHRepo', function (args, done) {
+            done(null, { name: 'test_repo', owner: { login: 'test_owner' }, id: 1 });
+        });
+        var arg = {
+            repo: 'myRepo',
+            owner: 'owner',
+            repoId: 1,
+            number: '1'
+        };
+
+        repo.getPRCommitters(arg, function (err) {
+            assert.ifError(err);
+            assert(Repo.findOne.called);
+            assert(github.direct_call.calledTwice);
+
+            it_done();
+            repo.getGHRepo.restore();
+        });
+        setTimeout(it_done, 2500);
     });
 });
 
@@ -529,6 +603,41 @@ describe('repo:getUserRepos', function () {
             assert(res.length === 1);
             assert(Repo.find.called);
 
+            it_done();
+        });
+    });
+
+    it('should update repo name and owner on db if github repo was transferred', function (it_done) {
+        var ghResponse = [{
+            name: 'newRepoName',
+            owner: { login: 'newOwner' },
+            id: '123',
+            permissions: { push: true }
+        }];
+        sinon.stub(github, 'direct_call', function (args, done) {
+            assert(args.token);
+            done(null, {
+                data: ghResponse
+            });
+        });
+        var dbResponse = [{
+            repo: 'myRepo',
+            owner: 'owner',
+            repoId: 123,
+            save: function(){}
+        }];
+        sinon.stub(Repo, 'find', function (args, done) {
+            assert.equal(args.$or.length, 1);
+            done(null, dbResponse);
+        });
+        sinon.spy(dbResponse[0], 'save');
+        repo.getUserRepos({
+            token: 'test_token'
+        }, function (err, obj) {
+            assert.equal(obj[0].repoId, 123);
+            assert.equal(obj[0].repo, ghResponse[0].name);
+            assert.equal(obj[0].owner, ghResponse[0].owner.login);
+            assert(dbResponse[0].save.called);
             it_done();
         });
     });

@@ -14,6 +14,9 @@ describe('Settings Controller', function () {
         },
         'user': null,
         'files': {
+            'metadata': {
+                'content': ''
+            },
             'ring.erl': {
                 'content': 'contents of gist'
             }
@@ -69,7 +72,8 @@ describe('Settings Controller', function () {
             user: 'login',
             repo: 'myRepo'
         };
-        scope.repo = {
+        scope.item = {
+            repoId: 123,
             repo: 'myRepo',
             owner: 'login',
             gist: 'https://gist.github.com/gistId'
@@ -93,9 +97,9 @@ describe('Settings Controller', function () {
 
 
             if (obj === 'cla' && fun === 'getAll') {
-                (args.repo).should.be.equal(scope.repo.repo);
-                (args.owner).should.be.equal(scope.repo.owner);
-                (args.gist.gist_url).should.be.equal(scope.repo.gist);
+                (!args.orgId && !args.repoId).should.be.equal(false);
+
+                (args.gist.gist_url).should.be.equal(scope.item.gist);
                 var resp = args.gist.gist_version ? [{user: 'login' }] : [{
                     user: 'login'
                 }, {
@@ -103,10 +107,12 @@ describe('Settings Controller', function () {
                 }];
                 error = testErr.cla.getAll || null;
                 response.value = testResp.cla.getAll || resp;
+            } else if (obj === 'cla' && fun === 'get') {
+                response.value = { raw: '<p>cla text</p>', meta: '<p>{ "name": {"type": "string", "title": "Full Name", "githubKey": "name"},"email": {"type": "string","githubKey": "email", "required": "true"},"age": {"description": "Age in years","type": "number","minimum": "0", "required": "true"}}</p>' };
             } else if (obj === 'cla' && fun === 'getGist') {
-                (args.repo).should.be.equal(scope.repo.repo);
-                (args.owner).should.be.equal(scope.repo.owner);
-                (args.gist.gist_url).should.be.equal(scope.repo.gist);
+                (args.repo).should.be.equal(scope.item.repo);
+                (args.owner).should.be.equal(scope.item.owner);
+                (args.gist.gist_url).should.be.equal(scope.item.gist);
 
                 response.value = testResp.cla.getGist || testGistData;
             } else if (obj === 'webhook' && fun === 'get') {
@@ -131,15 +137,6 @@ describe('Settings Controller', function () {
             if (error) {
                 cb(error);
                 return response;
-            }
-
-            if (obj === 'user' && fun === 'getFrom') {
-                response.value = {
-                    id: 12,
-                    login: 'login',
-                    name: 'name',
-                    html_url: 'url'
-                };
             }
 
             if (typeof cb === 'function') {
@@ -190,16 +187,25 @@ describe('Settings Controller', function () {
 
             (settingsCtrl.scope.loading).should.not.be.ok;
             (settingsCtrl.scope.gist.url).should.be.equal(testGistData.url);
-            (settingsCtrl.scope.repo).should.not.be.empty;
+            (settingsCtrl.scope.item).should.not.be.empty;
             (calledApi.RPC.cla.getGist).should.be.equal(true);
             (calledApi.RPC.cla.getAll).should.be.equal(true);
             (calledApi.RPC.webhook.get).should.be.equal(true);
         });
 
-        it('should get gist file name', function () {
+        it('should get gist file name and store it in scope.gist object, ignore metadata file', function () {
             var gistName = settingsCtrl.scope.getGistName();
 
             (gistName).should.be.equal('ring.erl');
+            (settingsCtrl.scope.gist.fileName).should.be.equal('ring.erl');
+        });
+
+        it('should use fileName from scope.gist object if given', function () {
+            settingsCtrl.scope.gist.fileName = 'testName';
+            var gistName = settingsCtrl.scope.getGistName();
+
+            (gistName).should.be.equal('testName');
+            settingsCtrl.scope.gist.fileName = undefined;
         });
 
         it('should get number of contributors on init', function () {
@@ -208,25 +214,97 @@ describe('Settings Controller', function () {
             (settingsCtrl.scope.signatures.value.length).should.be.equal(1);
         });
 
-        it('should get all contributors signed this cla', function () {
-            var repo = settingsCtrl.scope.repo;
-
+        it('should prepare csv header for custom fields', function () {
             testResp.cla.getAll = [{
+                owner: 'octocat',
+                repo: 'Hello-World',
                 user: 'login',
-                gist_version: '57a7f021a713b1c5a6a199b54cc514735d2d462f',
-                created_at: '2010-04-16T02:15:15Z'
+                gist_url: testGistData.url,
+                gist_version: testGistData.history[0].version,
+                created_at: '2010-04-16T02:15:15Z',
+                org_cla: 'false',
+                custom_fields: '{ "name": "Test User", "email": "testEmail" }'
             }];
 
-            settingsCtrl.scope.getContributors();
+            settingsCtrl.scope.getContributors(testGistData.history[0].version);
+            settingsCtrl.scope.$apply();
+
+            (settingsCtrl.scope.csvHeader.indexOf('Full Name')).should.be.greaterThan(-1);
+            (settingsCtrl.scope.csvHeader.indexOf('email')).should.be.greaterThan(-1);
+        });
+
+        it('should get all contributors signed this cla', function () {
+            testResp.cla.getAll = [{
+                owner: 'octocat',
+                repo: 'Hello-World',
+                user: 'login',
+                gist_url: testGistData.url,
+                gist_version: testGistData.history[0].version,
+                created_at: '2010-04-16T02:15:15Z',
+                org_cla: 'false',
+                custom_fields: '{ "name": "Test User", "email": "testEmail" }'
+            }];
+
+            settingsCtrl.scope.getContributors(testGistData.history[0].version);
+            settingsCtrl.scope.$apply();
+
+            (settingsCtrl.scope.contributors[0].name).should.be.equal('Test User');
+            (settingsCtrl.scope.contributors[0].email).should.be.equal('testEmail');
+        });
+
+        it('should fill custom fields if there are some', function () {
+            testResp.cla.getAll = [{
+                owner: 'octocat',
+                repo: 'Hello-World',
+                user: 'login',
+                gist_url: testGistData.url,
+                gist_version: testGistData.history[0].version,
+                created_at: '2010-04-16T02:15:15Z',
+                org_cla: 'false'
+            }];
+
+            settingsCtrl.scope.getContributors(testGistData.history[0].version);
+            settingsCtrl.scope.$apply();
 
             (settingsCtrl.scope.contributors.length).should.be.equal(1);
             (settingsCtrl.scope.contributors[0].user_name).should.be.equal('login');
-            (settingsCtrl.scope.contributors[0].repo_owner).should.be.equal(repo.owner);
-            (settingsCtrl.scope.contributors[0].repo_name).should.be.equal(repo.repo);
+            (settingsCtrl.scope.contributors[0].repo_owner).should.be.equal('octocat');
+            (settingsCtrl.scope.contributors[0].repo_name).should.be.equal('Hello-World');
             (settingsCtrl.scope.contributors[0].gist_name).should.be.equal('ring.erl');
             (settingsCtrl.scope.contributors[0].gist_url).should.be.equal(testGistData.url);
             (settingsCtrl.scope.contributors[0].gist_version).should.be.equal(testGistData.history[0].version);
             (settingsCtrl.scope.contributors[0].signed_at).should.be.equal('2010-04-16T02:15:15Z');
+            (settingsCtrl.scope.contributors[0].org_cla).should.be.equal('false');
+        });
+
+        it('should fill all relevant fields for org cla', function () {
+            settingsCtrl.scope.item = {
+                orgId: 1,
+                gist: testGistData.url
+            };
+
+            testResp.cla.getAll = [{
+                owner: 'octocat',
+                repo: 'Hello-World',
+                user: 'login',
+                gist_url: testGistData.url,
+                gist_version: testGistData.history[0].version,
+                created_at: '2010-04-16T02:15:15Z',
+                org_cla: 'true'
+            }];
+
+            settingsCtrl.scope.getContributors(testGistData.history[0].version);
+            settingsCtrl.scope.$apply();
+
+            (settingsCtrl.scope.contributors.length).should.be.equal(1);
+            (settingsCtrl.scope.contributors[0].user_name).should.be.equal('login');
+            (settingsCtrl.scope.contributors[0].repo_owner).should.be.equal('octocat');
+            (settingsCtrl.scope.contributors[0].repo_name).should.be.equal('Hello-World');
+            (settingsCtrl.scope.contributors[0].gist_name).should.be.equal('ring.erl');
+            (settingsCtrl.scope.contributors[0].gist_url).should.be.equal(testGistData.url);
+            (settingsCtrl.scope.contributors[0].gist_version).should.be.equal(testGistData.history[0].version);
+            (settingsCtrl.scope.contributors[0].signed_at).should.be.equal('2010-04-16T02:15:15Z');
+            (settingsCtrl.scope.contributors[0].org_cla).should.be.equal('true');
         });
 
         it('should get gist from github on getGist function', function () {
@@ -241,11 +319,23 @@ describe('Settings Controller', function () {
         });
 
         describe('on getSignatures', function(){
+            it('should get data for linked org', function (it_done) {
+                scope.item.repoId = undefined;
+                scope.item.orgId = 1;
+
+                testResp.cla.getAll = undefined;
+
+                settingsCtrl.scope.getSignatures(scope.item, 1, function(err, signatures){
+                    (calledApi.RPC.cla.getAll).should.be.equal(true);
+                    (signatures.value.length).should.be.equal(1);
+                    it_done();
+                });
+            });
+
             it('should reload data for other gist versions', function (it_done) {
                 var args = {
-                    repo: scope.repo.repo,
-                    owner: scope.repo.owner,
-                    gist: scope.repo.gist
+                    repoId: scope.item.repoId,
+                    gist: scope.item.gist
                 };
                 testResp.cla.getAll = undefined;
 
@@ -257,7 +347,7 @@ describe('Settings Controller', function () {
             });
         });
 
-        describe('on validateLinkedRepo', function () {
+        describe('on validateLinkedItem', function () {
             beforeEach(function () {
 
                 settingsCtrl.scope.gist = {};
@@ -271,17 +361,17 @@ describe('Settings Controller', function () {
                 sinon.spy(scope, 'getSignatures');
                 testResp.cla.getGist = testGistData;
 
-                settingsCtrl.scope.validateLinkedRepo();
+                settingsCtrl.scope.validateLinkedItem();
                 $timeout.flush();
 
-                (scope.getSignatures.calledWith(scope.repo, scope.gist.history[0].version)).should.be.equal(true);
+                (scope.getSignatures.calledWith(scope.item, scope.gist.history[0].version)).should.be.equal(true);
             });
 
             it('should indicate loading', function () {
                 $timeout.flush();
                 (settingsCtrl.scope.loading).should.be.equal(false);
 
-                settingsCtrl.scope.validateLinkedRepo();
+                settingsCtrl.scope.validateLinkedItem();
 
                 (settingsCtrl.scope.loading).should.be.equal(true);
                 $timeout.flush();
@@ -289,7 +379,7 @@ describe('Settings Controller', function () {
             });
 
             it('should validate repo by checking repo, gist and webhook', function () {
-                settingsCtrl.scope.validateLinkedRepo();
+                settingsCtrl.scope.validateLinkedItem();
 
                 $timeout.flush();
                 (settingsCtrl.scope.loading).should.not.be.equal(true);
@@ -299,7 +389,7 @@ describe('Settings Controller', function () {
 
             it('should use active flag of webhook to validate it', function () {
                 testResp.webhook.get = {active: false};
-                settingsCtrl.scope.validateLinkedRepo();
+                settingsCtrl.scope.validateLinkedItem();
 
                 $timeout.flush();
                 (settingsCtrl.scope.loading).should.not.be.equal(true);
@@ -315,7 +405,15 @@ describe('Settings Controller', function () {
                     owner: 'login'
                 });
 
-                (calledApi.RPC.cla.validatePullRequests).should.be.equal(true);
+                (RPC.call.calledWithMatch('cla', 'validatePullRequests', {repo: 'myRepo', owner: 'login'})).should.be.equal(true);
+            });
+
+            it('should get a repo for linked org which should be checked', function () {
+                settingsCtrl.scope.recheck({
+                    org: 'octocat'
+                });
+
+                (RPC.call.calledWithMatch('cla', 'validateOrgPullRequests', {org: 'octocat'})).should.be.equal(true);
             });
         });
 
@@ -326,7 +424,7 @@ describe('Settings Controller', function () {
 
                 settingsCtrl.scope.getReport();
 
-                (scope.getSignatures.calledWith(scope.repo, scope.gist.history[0].version)).should.be.equal(true);
+                (scope.getSignatures.calledWith(scope.item, scope.gist.history[0].version)).should.be.equal(true);
             });
             it('should prepare array of contributors for export', function () {
                 sinon.stub(modal, 'open', function () {
@@ -338,6 +436,7 @@ describe('Settings Controller', function () {
                 $timeout.flush();
 
                 settingsCtrl.scope.getReport();
+                settingsCtrl.scope.$apply();
 
                 settingsCtrl.scope.contributors.length.should.be.equal(1);
             });
@@ -375,7 +474,7 @@ describe('Settings Controller', function () {
 
     describe('handling errors', function () {
         it('should load gist file only if gist url is given', function () {
-            scope.repo = {
+            scope.item = {
                 repo: 'myRepo',
                 owner: 'login',
                 gist: ''

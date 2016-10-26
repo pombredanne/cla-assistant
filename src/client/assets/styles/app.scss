@@ -103,6 +103,10 @@ $nav-tabs-link-hover-border-color: $gray-light;
 $nav-tabs-active-link-hover-border-color: $gray-light;
 $nav-tabs-active-link-hover-bg: $gray-lighter;
 
+//margin
+$margin-small: 15px;
+$margin-medium: 30px;
+
 // navbar
 
 // breadcrumb
@@ -124,6 +128,7 @@ $label-color: $brand-primary;
 @import 'browser';
 @import 'btn';
 @import 'landing-page';
+@import 'link';
 @import 'list-group';
 @import 'modal';
 @import 'navbar';
@@ -170,6 +175,16 @@ h4 {
 h4{
   margin: 25px 0;
   padding-left: 0;
+}
+
+label, .checkbox label {
+  margin-top: $margin-small;
+  font-weight: 100;
+}
+
+label.required:after,
+.checkbox label.required:after {
+  content: " *";
 }
 
 .text-body {
@@ -444,8 +459,22 @@ small {
 
 // _popover
 .popover-inner{
-  display: -moz-grid-line;
+  // display: -moz-grid-line;
   i {
       width: 100%;
   }
+}
+
+.sign-btn {
+  margin-top: $margin-medium;
+  width:100%;
+  height:45px;
+}
+
+// _custom_fields
+
+.description {
+  color: $gray-dark;
+  font-size: smaller;
+  display: inline-block;
 }
